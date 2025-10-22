@@ -212,13 +212,13 @@ function placeBlock() {
     scene.remove(activeBlock);
     addBlock(newX, newZ, newWidth, newDepth, 'stacked');
 
-    // Overhang piece with physics
-    const overhangWidth = direction === 'x' ? prevBlock.width - newWidth : newWidth;
-    const overhangDepth = direction === 'z' ? prevBlock.depth - newDepth : newDepth;
+    // Overhang piece with physics - FIXED: ensure shape matches mesh dimensions exactly
+    const overhangWidth = direction === 'x' ? Math.abs(prevBlock.width - overlap) : prevBlock.width;
+    const overhangDepth = direction === 'z' ? Math.abs(prevBlock.depth - overlap) : prevBlock.depth;
 
-    if (overhangWidth > 0.01 || overhangDepth > 0.01) {
-        const overhangX = direction === 'x' ? newX + (newWidth / 2 * overhang) + (overhangWidth / 2 * overhang) : newX;
-        const overhangZ = direction === 'z' ? newZ + (newDepth / 2 * overhang) + (overhangDepth / 2 * overhang) : newZ;
+    if (overhangWidth > 0.01 && overhangDepth > 0.01) {
+        const overhangX = direction === 'x' ? newX + (overlap / 2 * overhang) + (overhangWidth / 2 * overhang) : newX;
+        const overhangZ = direction === 'z' ? newZ + (overlap / 2 * overhang) + (overhangDepth / 2 * overhang) : newZ;
         
         const overhangGeometry = new THREE.BoxGeometry(overhangWidth, BLOCK_HEIGHT, overhangDepth);
         const overhangMaterial = activeBlock.material;
@@ -226,12 +226,12 @@ function placeBlock() {
         overhangMesh.position.set(overhangX, activeBlock.position.y, overhangZ);
         scene.add(overhangMesh);
         
-        // Create physics body for overhang with minimal offset
+        // Create physics body for overhang - shape now exactly matches mesh dimensions
         const shape = new CANNON.Box(new CANNON.Vec3(overhangWidth / 2, BLOCK_HEIGHT / 2, overhangDepth / 2));
         const body = new CANNON.Body({
             mass: 1,
             shape: shape,
-            position: new CANNON.Vec3(overhangX, activeBlock.position.y + BLOCK_HEIGHT * 0.6, overhangZ),
+            position: new CANNON.Vec3(overhangX, activeBlock.position.y, overhangZ),
             linearDamping: 0.1,
             angularDamping: 0.2,
             collisionFilterGroup: 1,
@@ -243,12 +243,12 @@ function placeBlock() {
         body.allowSleep = true;
         world.addBody(body);
         
-        // Add initial velocity based on direction with minimal upward component
+        // Add initial velocity based on direction
         if (direction === 'x') {
-            body.velocity.set(activeBlock.userData.speed * 40, 0.5, 0);
+            body.velocity.set(activeBlock.userData.speed * 40, 0, 0);
             body.angularVelocity.set(0, 0, activeBlock.userData.speed * 10);
         } else {
-            body.velocity.set(0, 0.5, activeBlock.userData.speed * 40);
+            body.velocity.set(0, 0, activeBlock.userData.speed * 40);
             body.angularVelocity.set(activeBlock.userData.speed * 10, 0, 0);
         }
         

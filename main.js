@@ -318,7 +318,7 @@ function shatterBlock(overhang) {
         particleMesh.position.copy(overhang.mesh.position);
         scene.add(particleMesh);
         
-        // Create physics body for particle
+        // Create physics body for particle - NO COLLISION with other objects
         const shape = new CANNON.Box(new CANNON.Vec3(size / 2, size / 2, size / 2));
         const body = new CANNON.Body({
             mass: 0.1,
@@ -329,7 +329,9 @@ function shatterBlock(overhang) {
                 overhang.mesh.position.z
             ),
             linearDamping: 0.3,
-            angularDamping: 0.3
+            angularDamping: 0.3,
+            collisionFilterGroup: 2, // Different group
+            collisionFilterMask: 0 // Don't collide with anything
         });
         
         // Explosive outward velocity
@@ -373,6 +375,21 @@ function animate() {
     const stackHeight = BLOCK_HEIGHT * stack.length;
     
     for (const overhang of overhangs) {
+        // Initialize spawn time if not set
+        if (overhang.spawnTime === undefined) {
+            overhang.spawnTime = Date.now();
+        }
+        
+        // Check if block hasn't fallen after time limit (2 seconds)
+        const timeSinceSpawn = Date.now() - overhang.spawnTime;
+        const hasntFallen = overhang.body.position.y >= overhang.mesh.position.y - 0.3;
+        
+        if (timeSinceSpawn > 2000 && hasntFallen && overhang.life === undefined) {
+            const particles = shatterBlock(overhang);
+            overhangs.push(...particles);
+            continue;
+        }
+        
         // Check for stuck/floating blocks
         const velocity = overhang.body.velocity.length();
         const angularVelocity = overhang.body.angularVelocity.length();
@@ -380,11 +397,11 @@ function animate() {
                            overhang.body.position.y < stackHeight + 0.5;
         
         // More aggressive stuck detection
-        if (velocity < 0.5 && angularVelocity < 0.5 && isNearStack && !overhang.body.sleepState) {
+        if (velocity < 0.5 && angularVelocity < 0.5 && isNearStack && !overhang.body.sleepState && overhang.life === undefined) {
             overhang.stuckCounter = (overhang.stuckCounter || 0) + 1;
             
             // After being stuck for multiple frames, shatter the block
-            if (overhang.stuckCounter > 30) {
+            if (overhang.stuckCounter > 20) {
                 const particles = shatterBlock(overhang);
                 overhangs.push(...particles);
                 continue; // Skip adding this overhang back

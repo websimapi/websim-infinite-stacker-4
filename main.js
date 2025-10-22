@@ -257,7 +257,12 @@ function placeBlock() {
         // Apply immediate downward impulse to ensure falling starts
         body.applyImpulse(new CANNON.Vec3(0, -0.5, 0), body.position);
         
-        overhangs.push({ mesh: overhangMesh, body: body, stuckCounter: 0 });
+        overhangs.push({ 
+            mesh: overhangMesh, 
+            body: body, 
+            stuckCounter: 0,
+            originalColor: overhangMaterial.color.clone()
+        });
     }
     
     activeBlock = null;
@@ -297,6 +302,68 @@ function gameOver() {
     gameOverElement.classList.remove('hidden');
 }
 
+function shatterBlock(overhang) {
+    const particleCount = 20;
+    const particles = [];
+    const color = overhang.originalColor || overhang.mesh.material.color;
+    
+    // Create small cube fragments
+    for (let i = 0; i < particleCount; i++) {
+        const size = Math.random() * 0.08 + 0.04;
+        const geometry = new THREE.BoxGeometry(size, size, size);
+        const material = new THREE.MeshLambertMaterial({ color: color });
+        const particleMesh = new THREE.Mesh(geometry, material);
+        
+        // Start at overhang position
+        particleMesh.position.copy(overhang.mesh.position);
+        scene.add(particleMesh);
+        
+        // Create physics body for particle
+        const shape = new CANNON.Box(new CANNON.Vec3(size / 2, size / 2, size / 2));
+        const body = new CANNON.Body({
+            mass: 0.1,
+            shape: shape,
+            position: new CANNON.Vec3(
+                overhang.mesh.position.x,
+                overhang.mesh.position.y,
+                overhang.mesh.position.z
+            ),
+            linearDamping: 0.3,
+            angularDamping: 0.3
+        });
+        
+        // Explosive outward velocity
+        const angle = Math.random() * Math.PI * 2;
+        const speed = Math.random() * 3 + 2;
+        body.velocity.set(
+            Math.cos(angle) * speed,
+            Math.random() * 2 + 1,
+            Math.sin(angle) * speed
+        );
+        body.angularVelocity.set(
+            (Math.random() - 0.5) * 10,
+            (Math.random() - 0.5) * 10,
+            (Math.random() - 0.5) * 10
+        );
+        
+        world.addBody(body);
+        
+        particles.push({ 
+            mesh: particleMesh, 
+            body: body,
+            life: 120 // frames before removal
+        });
+    }
+    
+    // Remove original overhang
+    scene.remove(overhang.mesh);
+    overhang.mesh.geometry.dispose();
+    overhang.mesh.material.dispose();
+    world.removeBody(overhang.body);
+    
+    return particles;
+}
+
 function animate() {
     // Step physics world
     world.step(1 / 60);
@@ -316,25 +383,11 @@ function animate() {
         if (velocity < 0.5 && angularVelocity < 0.5 && isNearStack && !overhang.body.sleepState) {
             overhang.stuckCounter = (overhang.stuckCounter || 0) + 1;
             
-            // After being stuck for multiple frames, apply corrective force
-            if (overhang.stuckCounter > 10) {
-                const dx = overhang.body.position.x;
-                const dz = overhang.body.position.z;
-                const dist = Math.sqrt(dx * dx + dz * dz);
-                
-                // Apply outward force and downward force
-                if (dist > 0.1) {
-                    const pushX = (dx / dist) * 3;
-                    const pushZ = (dz / dist) * 3;
-                    overhang.body.applyForce(new CANNON.Vec3(pushX, -2, pushZ), overhang.body.position);
-                } else {
-                    const angle = Math.random() * Math.PI * 2;
-                    overhang.body.applyForce(new CANNON.Vec3(Math.cos(angle) * 3, -2, Math.sin(angle) * 3), overhang.body.position);
-                }
-                
-                // Wake up the body
-                overhang.body.wakeUp();
-                overhang.stuckCounter = 0;
+            // After being stuck for multiple frames, shatter the block
+            if (overhang.stuckCounter > 30) {
+                const particles = shatterBlock(overhang);
+                overhangs.push(...particles);
+                continue; // Skip adding this overhang back
             }
         } else {
             overhang.stuckCounter = 0;
@@ -344,14 +397,25 @@ function animate() {
         overhang.mesh.position.copy(overhang.body.position);
         overhang.mesh.quaternion.copy(overhang.body.quaternion);
         
-        if (overhang.mesh.position.y > -10) {
-            newOverhangs.push(overhang);
-        } else {
+        // Handle particle lifetime
+        if (overhang.life !== undefined) {
+            overhang.life--;
+            if (overhang.life <= 0 || overhang.mesh.position.y < -10) {
+                scene.remove(overhang.mesh);
+                overhang.mesh.geometry.dispose();
+                overhang.mesh.material.dispose();
+                world.removeBody(overhang.body);
+                continue;
+            }
+        } else if (overhang.mesh.position.y < -10) {
             scene.remove(overhang.mesh);
             overhang.mesh.geometry.dispose();
             overhang.mesh.material.dispose();
             world.removeBody(overhang.body);
+            continue;
         }
+        
+        newOverhangs.push(overhang);
     }
     overhangs = newOverhangs;
 

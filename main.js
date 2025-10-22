@@ -1,0 +1,367 @@
+import * as THREE from 'three';
+import * as CANNON from 'cannon-es';
+
+const container = document.getElementById('container');
+const canvas = document.getElementById('game-canvas');
+const scoreElement = document.getElementById('score');
+const instructionsElement = document.getElementById('instructions');
+const gameOverElement = document.getElementById('game-over');
+const finalScoreElement = document.getElementById('final-score');
+const restartButton = document.getElementById('restart-button');
+
+let camera, scene, renderer;
+let world; // Physics world
+let stack = [];
+let overhangs = [];
+let activeBlock;
+
+const BLOCK_HEIGHT = 0.25;
+const ORIGINAL_BLOCK_SIZE = 1;
+
+let gameState = 'loading'; // loading, playing, gameover
+
+function init() {
+    // Scene setup
+    scene = new THREE.Scene();
+
+    // Physics world setup
+    world = new CANNON.World();
+    world.gravity.set(0, -9.82, 0);
+    world.broadphase = new CANNON.NaiveBroadphase();
+    world.solver.iterations = 10;
+
+    // Add contact material to reduce sticking
+    const defaultMaterial = new CANNON.Material('default');
+    const contactMaterial = new CANNON.ContactMaterial(defaultMaterial, defaultMaterial, {
+        friction: 0.3,
+        restitution: 0.5,
+        contactEquationStiffness: 1e7,
+        contactEquationRelaxation: 3
+    });
+    world.addContactMaterial(contactMaterial);
+    world.defaultContactMaterial = contactMaterial;
+
+    // Base block
+    addBlock(0, 0, ORIGINAL_BLOCK_SIZE, ORIGINAL_BLOCK_SIZE, 'base');
+
+    // First moving block
+    spawnNewBlock();
+
+    // Lights
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    dirLight.position.set(10, 20, 0);
+    scene.add(dirLight);
+
+    // Camera
+    const aspect = window.innerWidth / window.innerHeight;
+    const frustumSize = 4;
+    camera = new THREE.OrthographicCamera(frustumSize * aspect / -2, frustumSize * aspect / 2, frustumSize / 2, frustumSize / -2, 1, 100);
+    camera.position.set(4, 4, 4);
+    camera.lookAt(0, 0, 0);
+    scene.add(camera);
+
+    // Renderer
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setAnimationLoop(animate);
+    
+    // Start game
+    gameState = 'playing';
+
+    // UI Listeners
+    restartButton.addEventListener('click', () => {
+        // Reset logic
+        overhangs.forEach(overhang => {
+            scene.remove(overhang.mesh);
+            overhang.mesh.geometry.dispose();
+            overhang.mesh.material.dispose();
+            world.removeBody(overhang.body);
+        });
+        stack.forEach(block => {
+            scene.remove(block.mesh);
+            block.mesh.geometry.dispose();
+            block.mesh.material.dispose();
+        });
+        if (activeBlock) {
+            scene.remove(activeBlock);
+            activeBlock.geometry.dispose();
+            activeBlock.material.dispose();
+            activeBlock = null;
+        }
+
+        stack = [];
+        overhangs = [];
+
+        scoreElement.innerText = '0';
+        gameOverElement.classList.add('hidden');
+        instructionsElement.classList.remove('hidden');
+
+        addBlock(0, 0, ORIGINAL_BLOCK_SIZE, ORIGINAL_BLOCK_SIZE, 'base');
+        spawnNewBlock();
+        camera.position.set(4, 4, 4);
+        camera.lookAt(0, 0, 0);
+
+        gameState = 'playing';
+    });
+
+    window.addEventListener('resize', onWindowResize, false);
+}
+
+function onWindowResize() {
+    const aspect = window.innerWidth / window.innerHeight;
+    const frustumSize = 4;
+    camera.left = frustumSize * aspect / -2;
+    camera.right = frustumSize * aspect / 2;
+    camera.top = frustumSize / 2;
+    camera.bottom = frustumSize / -2;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+window.addEventListener('pointerdown', () => {
+    if (gameState === 'playing') {
+        if (instructionsElement) instructionsElement.classList.add('hidden');
+        placeBlock();
+    }
+});
+
+function addBlock(x, z, width, depth, type) {
+    const y = BLOCK_HEIGHT * stack.length;
+    const geometry = new THREE.BoxGeometry(width, BLOCK_HEIGHT, depth);
+    
+    const color = new THREE.Color(`hsl(${stack.length * 8}, 70%, 50%)`);
+    const material = new THREE.MeshLambertMaterial({ color });
+    
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.set(x, y, z);
+    scene.add(mesh);
+
+    if (type === 'active') {
+        activeBlock = mesh;
+    } else {
+        const blockData = { mesh, width, depth };
+        
+        // Add physics body for placed blocks
+        if (type === 'stacked') {
+            const shape = new CANNON.Box(new CANNON.Vec3(width / 2, BLOCK_HEIGHT / 2, depth / 2));
+            const body = new CANNON.Body({
+                mass: 0, // Static body
+                shape: shape,
+                position: new CANNON.Vec3(x, y, z)
+            });
+            world.addBody(body);
+            blockData.body = body;
+        }
+        
+        stack.push(blockData);
+    }
+}
+
+function spawnNewBlock() {
+    if(stack.length === 0) return;
+    const prevBlock = stack[stack.length - 1];
+    
+    const direction = stack.length % 2 === 0 ? 'z' : 'x';
+    const newWidth = prevBlock.width;
+    const newDepth = prevBlock.depth;
+    
+    const x = direction === 'x' ? -2 : prevBlock.mesh.position.x;
+    const z = direction === 'z' ? -2 : prevBlock.mesh.position.z;
+
+    addBlock(x, z, newWidth, newDepth, 'active');
+    activeBlock.userData.direction = direction;
+    activeBlock.userData.speed = 0.02 + stack.length * 0.001;
+}
+
+function placeBlock() {
+    if (!activeBlock) return;
+    
+    const prevBlock = stack[stack.length - 1];
+    const direction = activeBlock.userData.direction;
+
+    let overlap, overhang;
+    let newWidth, newDepth;
+
+    if (direction === 'x') {
+        overlap = prevBlock.width - Math.abs(activeBlock.position.x - prevBlock.mesh.position.x);
+        overhang = activeBlock.position.x > prevBlock.mesh.position.x ? 1 : -1;
+        newWidth = overlap;
+        newDepth = prevBlock.depth;
+    } else { // direction === 'z'
+        overlap = prevBlock.depth - Math.abs(activeBlock.position.z - prevBlock.mesh.position.z);
+        overhang = activeBlock.position.z > prevBlock.mesh.position.z ? 1 : -1;
+        newWidth = prevBlock.width;
+        newDepth = overlap;
+    }
+    
+    if (overlap <= 0) {
+        gameOver();
+        return;
+    }
+
+    // Chopped block
+    const newX = direction === 'x' ? (activeBlock.position.x + prevBlock.mesh.position.x) / 2 : prevBlock.mesh.position.x;
+    const newZ = direction === 'z' ? (activeBlock.position.z + prevBlock.mesh.position.z) / 2 : prevBlock.mesh.position.z;
+
+    scene.remove(activeBlock);
+    addBlock(newX, newZ, newWidth, newDepth, 'stacked');
+
+    // Overhang piece with physics
+    const overhangWidth = direction === 'x' ? prevBlock.width - newWidth : newWidth;
+    const overhangDepth = direction === 'z' ? prevBlock.depth - newDepth : newDepth;
+
+    if (overhangWidth > 0.01 || overhangDepth > 0.01) {
+        const overhangX = direction === 'x' ? newX + (newWidth / 2 * overhang) + (overhangWidth / 2 * overhang) : newX;
+        const overhangZ = direction === 'z' ? newZ + (newDepth / 2 * overhang) + (overhangDepth / 2 * overhang) : newZ;
+        
+        const overhangGeometry = new THREE.BoxGeometry(overhangWidth, BLOCK_HEIGHT, overhangDepth);
+        const overhangMaterial = activeBlock.material;
+        const overhangMesh = new THREE.Mesh(overhangGeometry, overhangMaterial);
+        overhangMesh.position.set(overhangX, activeBlock.position.y, overhangZ);
+        scene.add(overhangMesh);
+        
+        // Create physics body for overhang with higher starting position to prevent initial overlap
+        const shape = new CANNON.Box(new CANNON.Vec3(overhangWidth / 2, BLOCK_HEIGHT / 2, overhangDepth / 2));
+        const body = new CANNON.Body({
+            mass: 1,
+            shape: shape,
+            position: new CANNON.Vec3(overhangX, activeBlock.position.y + BLOCK_HEIGHT, overhangZ),
+            linearDamping: 0.3,
+            angularDamping: 0.3,
+            collisionFilterGroup: 1,
+            collisionFilterMask: 1
+        });
+        world.addBody(body);
+        
+        // Add initial velocity based on direction with upward component to help unstick
+        if (direction === 'x') {
+            body.velocity.set(activeBlock.userData.speed * 50, 2, 0);
+        } else {
+            body.velocity.set(0, 2, activeBlock.userData.speed * 50);
+        }
+        
+        overhangs.push({ mesh: overhangMesh, body: body });
+    }
+    
+    activeBlock = null;
+
+    scoreElement.innerText = stack.length - 1;
+
+    // Camera position update
+    const cameraY = BLOCK_HEIGHT * stack.length + 4;
+    camera.position.y = cameraY;
+
+    spawnNewBlock();
+}
+
+function gameOver() {
+    gameState = 'gameover';
+    // The active block is the one that fell
+    if (activeBlock) {
+        // Create physics body for the falling active block
+        const width = activeBlock.geometry.parameters.width;
+        const depth = activeBlock.geometry.parameters.depth;
+        
+        const shape = new CANNON.Box(new CANNON.Vec3(width / 2, BLOCK_HEIGHT / 2, depth / 2));
+        const body = new CANNON.Body({
+            mass: 1,
+            shape: shape,
+            position: new CANNON.Vec3(activeBlock.position.x, activeBlock.position.y, activeBlock.position.z),
+            linearDamping: 0.3,
+            angularDamping: 0.3
+        });
+        body.velocity.x = activeBlock.userData.speed * 50;
+        world.addBody(body);
+        
+        overhangs.push({ mesh: activeBlock, body: body });
+        activeBlock = null;
+    }
+    finalScoreElement.innerText = stack.length - 1;
+    gameOverElement.classList.remove('hidden');
+}
+
+function animate() {
+    // Step physics world
+    world.step(1 / 60);
+    
+    // Update overhangs with physics
+    const newOverhangs = [];
+    const stackHeight = BLOCK_HEIGHT * stack.length;
+    
+    for (const overhang of overhangs) {
+        // Check for stuck blocks - blocks with low velocity near stack height
+        const velocity = overhang.body.velocity.length();
+        const isNearStack = overhang.body.position.y > stackHeight - 1 && 
+                           overhang.body.position.y < stackHeight + 1;
+        const isStuck = velocity < 0.3 && isNearStack;
+        
+        if (isStuck) {
+            // Gently push horizontally away from center instead of upward
+            const dx = overhang.body.position.x;
+            const dz = overhang.body.position.z;
+            const dist = Math.sqrt(dx * dx + dz * dz);
+            
+            if (dist > 0.1) {
+                // Push outward in horizontal direction
+                const pushX = (dx / dist) * 2;
+                const pushZ = (dz / dist) * 2;
+                overhang.body.velocity.set(pushX, overhang.body.velocity.y, pushZ);
+            } else {
+                // If at center, push in random horizontal direction
+                const angle = Math.random() * Math.PI * 2;
+                overhang.body.velocity.set(Math.cos(angle) * 2, overhang.body.velocity.y, Math.sin(angle) * 2);
+            }
+            
+            // Slightly lift to ensure it's not embedded
+            if (overhang.body.position.y < stackHeight + BLOCK_HEIGHT) {
+                overhang.body.position.y = stackHeight + BLOCK_HEIGHT;
+            }
+        }
+        
+        // Sync mesh with physics body
+        overhang.mesh.position.copy(overhang.body.position);
+        overhang.mesh.quaternion.copy(overhang.body.quaternion);
+        
+        if (overhang.mesh.position.y > -10) { // Keep overhangs that are still visible
+            newOverhangs.push(overhang);
+        } else { // Remove overhangs that are off-screen
+            scene.remove(overhang.mesh);
+            overhang.mesh.geometry.dispose();
+            overhang.mesh.material.dispose();
+            world.removeBody(overhang.body);
+        }
+    }
+    overhangs = newOverhangs;
+
+    if (gameState === 'playing' && activeBlock) {
+        const speed = activeBlock.userData.speed;
+        const direction = activeBlock.userData.direction;
+
+        if (direction === 'x') {
+            activeBlock.position.x += speed;
+            if (activeBlock.position.x > 2 || activeBlock.position.x < -2) {
+                activeBlock.userData.speed *= -1;
+            }
+        } else { // direction === 'z'
+            activeBlock.position.z += speed;
+            if (activeBlock.position.z > 2 || activeBlock.position.z < -2) {
+                activeBlock.userData.speed *= -1;
+            }
+        }
+
+        // Smooth camera follow
+        const targetCameraY = BLOCK_HEIGHT * stack.length + 4;
+        camera.position.y += (targetCameraY - camera.position.y) * 0.1;
+        camera.lookAt(0, stack.length * BLOCK_HEIGHT * 0.5, 0); // Look at middle of stack
+    }
+
+    if (renderer) {
+        renderer.render(scene, camera);
+    }
+}
+
+
+init();

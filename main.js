@@ -236,21 +236,26 @@ function placeBlock() {
             angularDamping: 0.2,
             collisionFilterGroup: 1,
             collisionFilterMask: 1,
-            sleepSpeedLimit: 0.1,
-            sleepTimeLimit: 0.5,
+            sleepSpeedLimit: 0.01,
+            sleepTimeLimit: 2,
             material: defaultMaterial
         });
-        body.allowSleep = true;
+        body.allowSleep = false; // Prevent sleep entirely
+        body.wakeUp(); // Ensure it's awake
         world.addBody(body);
         
-        // Add initial velocity based on direction
+        // Add initial velocity and immediate downward impulse
+        const lateralSpeed = activeBlock.userData.speed * 40;
         if (direction === 'x') {
-            body.velocity.set(activeBlock.userData.speed * 40, 0, 0);
+            body.velocity.set(lateralSpeed * overhang, -1, 0);
             body.angularVelocity.set(0, 0, activeBlock.userData.speed * 10);
         } else {
-            body.velocity.set(0, 0, activeBlock.userData.speed * 40);
+            body.velocity.set(0, -1, lateralSpeed * overhang);
             body.angularVelocity.set(activeBlock.userData.speed * 10, 0, 0);
         }
+        
+        // Apply immediate downward impulse to ensure falling starts
+        body.applyImpulse(new CANNON.Vec3(0, -0.5, 0), body.position);
         
         overhangs.push({ mesh: overhangMesh, body: body, stuckCounter: 0 });
     }

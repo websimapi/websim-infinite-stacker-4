@@ -27,16 +27,18 @@ function init() {
     // Physics world setup
     world = new CANNON.World();
     world.gravity.set(0, -9.82, 0);
-    world.broadphase = new CANNON.NaiveBroadphase();
-    world.solver.iterations = 10;
+    world.broadphase = new CANNON.SAPBroadphase(world);
+    world.solver.iterations = 20;
+    world.allowSleep = true;
 
     // Add contact material to reduce sticking
     const defaultMaterial = new CANNON.Material('default');
     const contactMaterial = new CANNON.ContactMaterial(defaultMaterial, defaultMaterial, {
-        friction: 0.3,
-        restitution: 0.5,
-        contactEquationStiffness: 1e7,
-        contactEquationRelaxation: 3
+        friction: 0.4,
+        restitution: 0.3,
+        contactEquationStiffness: 1e8,
+        contactEquationRelaxation: 3,
+        frictionEquationStiffness: 1e8
     });
     world.addContactMaterial(contactMaterial);
     world.defaultContactMaterial = contactMaterial;
@@ -223,27 +225,33 @@ function placeBlock() {
         overhangMesh.position.set(overhangX, activeBlock.position.y, overhangZ);
         scene.add(overhangMesh);
         
-        // Create physics body for overhang with higher starting position to prevent initial overlap
+        // Create physics body for overhang with minimal offset
         const shape = new CANNON.Box(new CANNON.Vec3(overhangWidth / 2, BLOCK_HEIGHT / 2, overhangDepth / 2));
         const body = new CANNON.Body({
             mass: 1,
             shape: shape,
-            position: new CANNON.Vec3(overhangX, activeBlock.position.y + BLOCK_HEIGHT, overhangZ),
-            linearDamping: 0.3,
-            angularDamping: 0.3,
+            position: new CANNON.Vec3(overhangX, activeBlock.position.y + BLOCK_HEIGHT * 0.6, overhangZ),
+            linearDamping: 0.1,
+            angularDamping: 0.2,
             collisionFilterGroup: 1,
-            collisionFilterMask: 1
+            collisionFilterMask: 1,
+            sleepSpeedLimit: 0.1,
+            sleepTimeLimit: 0.5,
+            material: defaultMaterial
         });
+        body.allowSleep = true;
         world.addBody(body);
         
-        // Add initial velocity based on direction with upward component to help unstick
+        // Add initial velocity based on direction with minimal upward component
         if (direction === 'x') {
-            body.velocity.set(activeBlock.userData.speed * 50, 2, 0);
+            body.velocity.set(activeBlock.userData.speed * 40, 0.5, 0);
+            body.angularVelocity.set(0, 0, activeBlock.userData.speed * 10);
         } else {
-            body.velocity.set(0, 2, activeBlock.userData.speed * 50);
+            body.velocity.set(0, 0.5, activeBlock.userData.speed * 40);
+            body.angularVelocity.set(activeBlock.userData.speed * 10, 0, 0);
         }
         
-        overhangs.push({ mesh: overhangMesh, body: body });
+        overhangs.push({ mesh: overhangMesh, body: body, stuckCounter: 0 });
     }
     
     activeBlock = null;
@@ -292,42 +300,47 @@ function animate() {
     const stackHeight = BLOCK_HEIGHT * stack.length;
     
     for (const overhang of overhangs) {
-        // Check for stuck blocks - blocks with low velocity near stack height
+        // Check for stuck/floating blocks
         const velocity = overhang.body.velocity.length();
-        const isNearStack = overhang.body.position.y > stackHeight - 1 && 
-                           overhang.body.position.y < stackHeight + 1;
-        const isStuck = velocity < 0.3 && isNearStack;
+        const angularVelocity = overhang.body.angularVelocity.length();
+        const isNearStack = overhang.body.position.y > stackHeight - 0.5 && 
+                           overhang.body.position.y < stackHeight + 0.5;
         
-        if (isStuck) {
-            // Gently push horizontally away from center instead of upward
-            const dx = overhang.body.position.x;
-            const dz = overhang.body.position.z;
-            const dist = Math.sqrt(dx * dx + dz * dz);
+        // More aggressive stuck detection
+        if (velocity < 0.5 && angularVelocity < 0.5 && isNearStack && !overhang.body.sleepState) {
+            overhang.stuckCounter = (overhang.stuckCounter || 0) + 1;
             
-            if (dist > 0.1) {
-                // Push outward in horizontal direction
-                const pushX = (dx / dist) * 2;
-                const pushZ = (dz / dist) * 2;
-                overhang.body.velocity.set(pushX, overhang.body.velocity.y, pushZ);
-            } else {
-                // If at center, push in random horizontal direction
-                const angle = Math.random() * Math.PI * 2;
-                overhang.body.velocity.set(Math.cos(angle) * 2, overhang.body.velocity.y, Math.sin(angle) * 2);
+            // After being stuck for multiple frames, apply corrective force
+            if (overhang.stuckCounter > 10) {
+                const dx = overhang.body.position.x;
+                const dz = overhang.body.position.z;
+                const dist = Math.sqrt(dx * dx + dz * dz);
+                
+                // Apply outward force and downward force
+                if (dist > 0.1) {
+                    const pushX = (dx / dist) * 3;
+                    const pushZ = (dz / dist) * 3;
+                    overhang.body.applyForce(new CANNON.Vec3(pushX, -2, pushZ), overhang.body.position);
+                } else {
+                    const angle = Math.random() * Math.PI * 2;
+                    overhang.body.applyForce(new CANNON.Vec3(Math.cos(angle) * 3, -2, Math.sin(angle) * 3), overhang.body.position);
+                }
+                
+                // Wake up the body
+                overhang.body.wakeUp();
+                overhang.stuckCounter = 0;
             }
-            
-            // Slightly lift to ensure it's not embedded
-            if (overhang.body.position.y < stackHeight + BLOCK_HEIGHT) {
-                overhang.body.position.y = stackHeight + BLOCK_HEIGHT;
-            }
+        } else {
+            overhang.stuckCounter = 0;
         }
         
         // Sync mesh with physics body
         overhang.mesh.position.copy(overhang.body.position);
         overhang.mesh.quaternion.copy(overhang.body.quaternion);
         
-        if (overhang.mesh.position.y > -10) { // Keep overhangs that are still visible
+        if (overhang.mesh.position.y > -10) {
             newOverhangs.push(overhang);
-        } else { // Remove overhangs that are off-screen
+        } else {
             scene.remove(overhang.mesh);
             overhang.mesh.geometry.dispose();
             overhang.mesh.material.dispose();

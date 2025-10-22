@@ -19,6 +19,7 @@ const BLOCK_HEIGHT = 0.25;
 const ORIGINAL_BLOCK_SIZE = 1;
 
 let gameState = 'loading'; // loading, playing, gameover
+let defaultMaterial; // Add material reference at module scope
 
 function init() {
     // Scene setup
@@ -32,7 +33,7 @@ function init() {
     world.allowSleep = true;
 
     // Add contact material to reduce sticking
-    const defaultMaterial = new CANNON.Material('default');
+    defaultMaterial = new CANNON.Material('default');
     const contactMaterial = new CANNON.ContactMaterial(defaultMaterial, defaultMaterial, {
         friction: 0.4,
         restitution: 0.3,
